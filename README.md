@@ -1,15 +1,10 @@
 # VOLTTRON Forward Historian
 
-Forward Historian republishes selected messages from one VOLTTRON platform on a
-second platform. If the destination is unreachable, messages remain in the
-source platform's local historian cache until it reconnects.
-
-```text
-source platform                                      destination platform
-
-driver or agent -> PubSub -> Forward Historian  --->  VIP/TCP -> PubSub
-                         cached locally if offline
-```
+The Forward Historian subscribes to selected message-bus topics on the source
+VOLTTRON platform and republishes those messages on the destination platform.
+If the destination is temporarily unreachable, messages are retained in the
+source platform's local historian cache and forwarded after the connection is
+restored.
 
 Forwarded messages retain their original topic and add these headers:
 
@@ -24,7 +19,7 @@ You need two working VOLTTRON platforms. The source platform runs the Forward
 Historian. The destination platform receives forwarded messages.
 
 This example uses the fake driver to forward simulated device data. Set up the
-fake driver by following its [installation instructions](https://github.com/eclipse-volttron/volttron-lib-fake-driver).
+fake driver by following the [develop-branch installation instructions](https://github.com/eclipse-volttron/volttron-lib-fake-driver/tree/develop).
 For a smoke test without the fake-driver checkout, see the `vctl publish`
 example in Step 5.
 
@@ -33,8 +28,10 @@ Once the fake driver is publishing, its device messages are normally below the
 
 ## 1. Choose the Destination Address
 
-Use TCP when the source and destination platforms run on different hosts. Use
-the destination platform's IPC socket when both platforms run on the same host.
+Use TCP when the source and destination platforms run on different hosts. When
+both platforms run on the same Linux host, they can connect through the
+destination platform's abstract IPC socket. Both transports still use platform
+authentication.
 
 ### Different Hosts: TCP VIP
 
@@ -74,26 +71,31 @@ Do not continue until this succeeds. If it fails, correct the destination
 address or firewall first.
 
 <details>
-<summary>Same Host: Use the destination IPC socket</summary>
+<summary>Same Linux Host: Use the destination IPC socket</summary>
 
-When both platforms run on the same machine, no TCP listener or firewall rule
-is needed. Use the destination platform's local VIP socket directly:
+When both platforms run on the same Linux host, no TCP listener or firewall
+rule is needed. VOLTTRON binds its local VIP socket as a Linux abstract Unix
+socket. Use the destination platform's absolute VOLTTRON_HOME in this address
+(including the leading `@`):
 
 ```text
-ipc:///YOUR_DESTINATION_VOLTTRON_HOME/run/vip.socket
+ipc://@/YOUR_DESTINATION_VOLTTRON_HOME/run/vip.socket
 ```
 
-Confirm that the destination socket exists:
+Confirm that the abstract socket is listening after starting the destination
+platform. It does not appear as a filesystem socket, so do not use `ls -l`:
 
 ```bash
-ls -l YOUR_DESTINATION_VOLTTRON_HOME/run/vip.socket
+ss -xl | grep -F 'vip.socket'
 ```
 
-Use this exact value as `destination-address` in `forwarder.config`:
+Use the IPC address and the destination platform's public server key in
+`forwarder.config`:
 
 ```json
 {
-  "destination-address": "ipc:///YOUR_DESTINATION_VOLTTRON_HOME/run/vip.socket",
+  "destination-address": "ipc://@/YOUR_DESTINATION_VOLTTRON_HOME/run/vip.socket",
+  "destination-serverkey": "paste-the-destination-platform-publickey-here",
   "required_target_agents": [],
   "capture_device_data": true,
   "capture_analysis_data": false,
@@ -105,15 +107,19 @@ Use this exact value as `destination-address` in `forwarder.config`:
 }
 ```
 
-Do not include `destination-serverkey` for an IPC destination. The key is only
-needed for a remote TCP connection.
+Retrieve the destination public server key with `vctl auth servercred` as
+described in Step 2. Even over IPC, the source and destination platforms have
+separate credentials; the forwarder needs the destination's key to authenticate
+the server correctly. The source forwarder's public key must also be registered
+on the destination in Step 4.
 
 </details>
 
 ## 2. Get the Destination Server Key
 
-This step applies only to a TCP destination on another host. Skip it when using
-the same-host IPC setup above.
+For a TCP or IPC destination, retrieve the destination platform's public server
+key. Skip this step only if the destination does not use authenticated ZMQ
+connections.
 
 On the destination host, retrieve the platform's public server key:
 

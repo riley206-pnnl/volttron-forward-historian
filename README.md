@@ -121,10 +121,13 @@ For a TCP or IPC destination, retrieve the destination platform's public server
 key. Skip this step only if the destination does not use authenticated ZMQ
 connections.
 
-On the destination host, retrieve the platform's public server key:
+Run this on the destination host. Set `VOLTTRON_HOME` to the destination
+platform's home directory so `vctl` addresses the correct platform. If both
+platforms are on the same machine, use the destination's path here; the source
+and destination have separate `VOLTTRON_HOME` directories.
 
 ```bash
-vctl auth servercred
+VOLTTRON_HOME=/path/to/DESTINATION_VOLTTRON_HOME vctl auth servercred
 ```
 
 Copy the returned key. The Forward Historian uses this as its
@@ -132,7 +135,7 @@ Copy the returned key. The Forward Historian uses this as its
 
 ## 3. Configure the Forwarder
 
-Create a file named `forwarder.config` anywhere convenient on the source host.
+On the source host, create a file named `forwarder.config` anywhere convenient.
 It does not need to live in the Forward Historian source checkout:
 
 ```bash
@@ -163,12 +166,15 @@ the messages published by a correctly configured fake driver.
 For a same-host IPC destination, use the configuration in the collapsible
 section above instead.
 
-Install the Forward Historian on the source platform. When installing from a
-local checkout, pass its path instead of the package name. The tag makes the
-agent easy to start without looking up its generated UUID:
+Run the following commands on the source host, selecting the source platform
+with its `VOLTTRON_HOME`. This is especially important when both platforms run
+on the same machine. When installing from a local checkout, pass its path
+instead of the package name. The tag makes the agent easy to start without
+looking up its generated UUID:
 
 ```bash
-vctl install /path/to/volttron-forward-historian \
+VOLTTRON_HOME=/path/to/SOURCE_VOLTTRON_HOME \
+  vctl install /path/to/volttron-forward-historian \
   --vip-identity platform.forwarder \
   --tag forwarder
 ```
@@ -176,28 +182,35 @@ vctl install /path/to/volttron-forward-historian \
 Add `forwarder.config` to the Forward Historian configuration store:
 
 ```bash
-vctl config store platform.forwarder config forwarder.config
+VOLTTRON_HOME=/path/to/SOURCE_VOLTTRON_HOME \
+  vctl config store platform.forwarder config /path/to/forwarder.config
 ```
 
-Retrieve the Forward Historian's public key from the source platform:
+Still on the source host and source `VOLTTRON_HOME`, retrieve the Forward
+Historian's public key:
 
 ```bash
-vctl auth agentcred platform.forwarder
+VOLTTRON_HOME=/path/to/SOURCE_VOLTTRON_HOME \
+  vctl auth agentcred platform.forwarder
 ```
 
 Copy the public key returned for `platform.forwarder`. You can use
 `--json` when a script needs structured output:
 
 ```bash
-vctl auth agentcred platform.forwarder --json
+VOLTTRON_HOME=/path/to/SOURCE_VOLTTRON_HOME \
+  vctl auth agentcred platform.forwarder --json
 ```
 
 ## 4. Authorize the Forwarder on the Destination
 
-On the destination host, register the source forwarder's public key:
+Run this on the destination host, selecting the destination platform with its
+`VOLTTRON_HOME`. If source and destination are on the same machine, this must
+point to the destination's home directory, not the source's.
 
 ```bash
-vctl auth add platform.forwarder \
+VOLTTRON_HOME=/path/to/DESTINATION_VOLTTRON_HOME \
+  vctl auth add platform.forwarder \
   --publickey "paste-the-source-forwarder-publickey-here"
 ```
 
@@ -206,8 +219,10 @@ key or manual JSON file creation. If `platform.forwarder` already exists on the
 destination, remove the stale record before registering a new key:
 
 ```bash
-vctl auth remove platform.forwarder
-vctl auth add platform.forwarder \
+VOLTTRON_HOME=/path/to/DESTINATION_VOLTTRON_HOME \
+  vctl auth remove platform.forwarder
+VOLTTRON_HOME=/path/to/DESTINATION_VOLTTRON_HOME \
+  vctl auth add platform.forwarder \
   --publickey "paste-the-source-forwarder-publickey-here"
 ```
 
@@ -216,16 +231,16 @@ credential record.
 
 ## 5. Start and Verify
 
-Start the forwarder on the source platform using its tag:
+Run these commands on the source host with the source platform's `VOLTTRON_HOME`:
 
 ```bash
-vctl start --tag forwarder
+VOLTTRON_HOME=/path/to/SOURCE_VOLTTRON_HOME vctl start --tag forwarder
 ```
 
 Check the agent status:
 
 ```bash
-vctl status
+VOLTTRON_HOME=/path/to/SOURCE_VOLTTRON_HOME vctl status
 ```
 
 With the fake driver running, publish device data and confirm that the
@@ -236,7 +251,8 @@ For a smoke test without the fake driver, publish a sample device message from
 the source platform:
 
 ```bash
-vctl publish devices/campus/building/device/all \
+VOLTTRON_HOME=/path/to/SOURCE_VOLTTRON_HOME vctl publish \
+  devices/campus/building/device/all \
   '{"Temperature":72.5,"Humidity":41}'
 ```
 

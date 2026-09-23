@@ -25,6 +25,8 @@ Historian. The destination platform receives forwarded messages.
 
 This example uses the fake driver to forward simulated device data. Set up the
 fake driver by following its [installation instructions](https://github.com/eclipse-volttron/volttron-lib-fake-driver).
+For a smoke test without the fake-driver checkout, see the `vctl publish`
+example in Step 5.
 
 Once the fake driver is publishing, its device messages are normally below the
 `devices/` topic tree. This guide forwards that entire tree.
@@ -113,13 +115,13 @@ needed for a remote TCP connection.
 This step applies only to a TCP destination on another host. Skip it when using
 the same-host IPC setup above.
 
-On the destination host, open its platform credential file:
+On the destination host, retrieve the platform's public server key:
 
 ```bash
-nano YOUR_VOLTTRON_HOME/credentials_store/platform.json
+vctl auth servercred
 ```
 
-Copy the `publickey` value. The Forward Historian uses this as its
+Copy the returned key. The Forward Historian uses this as its
 `destination-serverkey`.
 
 ## 3. Configure the Forwarder
@@ -132,7 +134,7 @@ nano forwarder.config
 ```
 
 For a TCP destination, paste the following, then replace the destination IP
-address and the `publickey` copied in Step 2:
+address and the key copied in Step 2:
 
 ```json
 {
@@ -155,10 +157,14 @@ the messages published by a correctly configured fake driver.
 For a same-host IPC destination, use the configuration in the collapsible
 section above instead.
 
-Install the Forward Historian on the source platform:
+Install the Forward Historian on the source platform. When installing from a
+local checkout, pass its path instead of the package name. The tag makes the
+agent easy to start without looking up its generated UUID:
 
 ```bash
-vctl install volttron-forward-historian --vip-identity platform.forwarder
+vctl install /path/to/volttron-forward-historian \
+  --vip-identity platform.forwarder \
+  --tag forwarder
 ```
 
 Add `forwarder.config` to the Forward Historian configuration store:
@@ -167,31 +173,96 @@ Add `forwarder.config` to the Forward Historian configuration store:
 vctl config store platform.forwarder config forwarder.config
 ```
 
-The install creates this credential on the source:
-
-```text
-YOUR_SOURCE_VOLTTRON_HOME/credentials_store/platform.forwarder.json
-```
-
-Open it and copy its `publickey` value:
+Retrieve the Forward Historian's public key from the source platform:
 
 ```bash
-nano YOUR_SOURCE_VOLTTRON_HOME/credentials_store/platform.forwarder.json
+vctl auth agentcred platform.forwarder
+```
+
+Copy the public key returned for `platform.forwarder`. You can use
+`--json` when a script needs structured output:
+
+```bash
+vctl auth agentcred platform.forwarder --json
 ```
 
 ## 4. Authorize the Forwarder on the Destination
 
-On the destination host, create a credential file for the source forwarder:
+On the destination host, register the source forwarder's public key:
 
 ```bash
-nano YOUR_DESTINATION_VOLTTRON_HOME/credentials_store/platform.forwarder.json
+vctl auth add platform.forwarder \
+  --publickey "paste-the-source-forwarder-publickey-here"
 ```
 
-Paste the following and replace the public key with the source forwarder's
-public key copied in Step 3:
+This stores the remote agent's public credentials without requiring a private
+key or manual JSON file creation. If `platform.forwarder` already exists on the
+destination, remove the stale record before registering a new key:
 
-```json
-{"identity":"platform.forwarder","publickey":"paste-the-source-forwarder-publickey-here","secretkey":"",
-"domain":"",
-"address":""}
+```bash
+vctl auth remove platform.forwarder
+vctl auth add platform.forwarder \
+  --publickey "paste-the-source-forwarder-publickey-here"
 ```
+
+Confirm the removal when prompted. `vctl auth add` does not replace an existing
+credential record.
+
+## 5. Start and Verify
+
+Start the forwarder on the source platform using its tag:
+
+```bash
+vctl start --tag forwarder
+```
+
+Check the agent status:
+
+```bash
+vctl status
+```
+
+With the fake driver running, publish device data and confirm that the
+destination receives the message under the same `devices/` topic with the
+`X-Forwarded` and `X-Forwarded-From` headers.
+
+For a smoke test without the fake driver, publish a sample device message from
+the source platform:
+
+```bash
+vctl publish devices/campus/building/device/all \
+  '{"Temperature":72.5,"Humidity":41}'
+```
+
+On the destination platform, subscribe to `devices/` or inspect the platform
+logs. `vctl publish` sends its data argument as a string, so this checks topic
+routing and forwarding headers; it does not emulate the fake driver's
+structured data-and-metadata payload. The received message should include:
+
+```text
+X-Forwarded: True
+X-Forwarded-From: YOUR_SOURCE_INSTANCE_NAME
+```
+
+To follow the platform logs while testing:
+
+```bash
+tail -f YOUR_SOURCE_VOLTTRON_HOME/volttron.log
+tail -f YOUR_DESTINATION_VOLTTRON_HOME/volttron.log
+```
+
+## Tests
+
+Run the focused Forward Historian tests with the local modular VOLTTRON
+dependencies installed:
+
+```bash
+pytest -q tests/test_forward_historian.py \
+  tests/test_forwarder_reconnections.py \
+  tests/test_multi_messagebus_forwarder.py
+```
+
+The core forwarding tests run without the legacy `PlatformWrapper` fixture.
+The optional multi-messagebus test remains skipped until the external
+`volttron-testing` fixture is updated for the current `bind_web_address` API
+and valid CurveZMQ keys.

@@ -1,179 +1,82 @@
-import gevent
+"""Configuration and reconnect behavior of the Forward Historian."""
+
+from types import SimpleNamespace
+
 import pytest
 
-from volttrontesting.agent_additions import add_forward_historian
-from volttrontesting.platformwrapper import PlatformWrapper, \
-    start_wrapper_platform
-from volttrontesting.utils import (publish_device_messages,
-                                   validate_published_device_data,
-                                   publish_message)
+from historian.forwarder.forwarder import ForwardHistorian
 
 
-@pytest.fixture(scope="module")
-def setup_instances(request):
-
-    inst1 = PlatformWrapper()
-    inst2 = PlatformWrapper()
-
-    start_wrapper_platform(inst1)
-    start_wrapper_platform(inst2)
-
-    yield inst1, inst2
-
-    inst1.shutdown_platform()
-    inst2.shutdown_platform()
+class _Future:
+    def get(self, timeout=None):
+        return True
 
 
-def instance_reset(wrapper):
-    if not wrapper.is_running():
-        wrapper.restart_platform()
+class _PubSub:
+    def __init__(self):
+        self.subscribed = []
 
-    wrapper.remove_all_agents()
+    def subscribe(self, **kwargs):
+        self.subscribed.append(kwargs)
+        return _Future()
 
-
-@pytest.mark.parametrize('topic_root,topic,replace,headers', [
-    ('devices', 'campus/building/unit/all', None, None),
-    ('devices', 'campus/building/unit/all', [{'from': 'building', 'to': 'woot'}], None),
-    ('record', 'building/data', None, None),
-    ('record', 'building/data', [{'from': 'building', 'to': 'woot'}], None),
-    ('actuator', 'foo/bar', None, None)
-])
-def test_topic_forwarding(setup_instances, topic_root, topic, replace, headers):
-    inst_forward, inst_target = setup_instances
-    inst_target.allow_all_connections()
-    instance_reset(inst_forward)
-    instance_reset(inst_target)
-    forward_config = {
-        "destination-vip": inst_target.vip_address,
-        "destination-serverkey": inst_target.serverkey
-    }
-
-    if replace:
-        forward_config['topic_replace_list'] = replace
-
-    if topic_root not in ('devices', 'record', 'analysis', 'datalogger'):
-        forward_config['custom_topic_list'] = [topic_root]
-
-    forwarder_uuid = add_forward_historian(inst_forward,
-                                           config=forward_config)
-
-    pubsub_retrieved = []
-
-    def _device_capture(peer, sender, bus, topic, headers, message):
-        pubsub_retrieved.append((topic, headers, message))
-
-    pub_listener = inst_target.build_agent()
-    pub_listener.vip.pubsub.subscribe(peer="pubsub",
-                                      prefix=topic_root,
-                                      callback=_device_capture).get()
-
-    gevent.sleep(0.5)
-
-    full_topic = '/'.join([topic_root, topic])
-
-    if topic_root == 'devices':
-        headers, message = publish_device_messages(inst_forward,
-                                                   all_topic=full_topic)
-        validate_published_device_data(headers, message,
-                                       pubsub_retrieved[0][1],
-                                       pubsub_retrieved[0][2])
-
-    elif topic_root == 'record':
-        headers, message = publish_message(inst_forward, full_topic,
-                                           headers=dict(foo='bar'),
-                                           message=dict(bim='baz'))
-        for k, v in headers.items():
-            assert k in pubsub_retrieved[0][1]
-            assert v == pubsub_retrieved[0][1][k]
-        for k, v in message.items():
-            assert k in pubsub_retrieved[0][2]
-            assert v == pubsub_retrieved[0][2][k]
-
-    elif topic_root == 'datalogger':
-        raise ValueError('not implemented yet')
-    else:
-        headers, message = publish_message(inst_forward, full_topic,
-                                           headers=dict(foo='bar'),
-                                           message='A simple string')
-        for k, v in headers.items():
-            assert k in pubsub_retrieved[0][1]
-            assert v == pubsub_retrieved[0][1][k]
-        assert message == pubsub_retrieved[0][2]
-        assert full_topic == pubsub_retrieved[0][0]
-
-    if replace:
-        new_topic = full_topic
-        for item in replace:
-            new_topic = new_topic.replace(item['from'], item['to'])
-        assert new_topic == pubsub_retrieved[0][0]
+    def unsubscribe(self, **kwargs):
+        return _Future()
 
 
-    # Stop the listener
-    pub_listener.core.stop()
+def _configurable_forwarder():
+    forwarder = ForwardHistorian.__new__(ForwardHistorian)
+    forwarder.destination_address = None
+    forwarder.destination_vip = "old-vip"
+    forwarder.destination_serverkey = "old-key"
+    forwarder.required_target_agents = []
+    forwarder.topic_replace_list = []
+    forwarder.cache_only = False
+    forwarder._topic_replace_map = {"old": "old"}
+    forwarder._current_custom_topics = set()
+    forwarder._last_timeout = 123
+    forwarder._target_platform = object()
+    forwarder.vip = SimpleNamespace(pubsub=_PubSub())
+    forwarder.historian_teardown_calls = 0
+
+    def teardown():
+        forwarder.historian_teardown_calls += 1
+        forwarder._target_platform = None
+
+    forwarder.historian_teardown = teardown
+    return forwarder
 
 
-def test_target_shutdown(setup_instances):
+@pytest.mark.forwarder
+def test_config_update_replaces_destination_and_reconnects():
+    forwarder = _configurable_forwarder()
 
-    inst_forward, inst_target = setup_instances
-    inst_target.allow_all_connections()
-    instance_reset(inst_forward)
-    instance_reset(inst_target)
+    forwarder.configure(
+        {
+            "destination-address": "tcp://127.0.0.1:22917",
+            "destination-serverkey": "new-key",
+            "custom_topic_list": ["foo"],
+            "topic-replace-list": [{"from": "old", "to": "new"}],
+            "cache-only": True,
+        }
+    )
 
-    listener_vip = "testforwarder"
-    forward_config = {
-        "destination-vip": inst_target.vip_address,
-        "destination-serverkey": inst_target.serverkey
-        # ,
-        # "required_target_agents": listener_vip
-    }
-
-    forwarder_uuid = add_forward_historian(inst_forward,
-                                           config=forward_config)
-
-    pubsub_retrieved = []
-
-    def _device_capture(peer, sender, bus, topic, headers, message):
-        pubsub_retrieved.append((topic, headers, message))
-
-    pub_listener = inst_target.build_agent()
-    pub_listener.vip.pubsub.subscribe(peer="pubsub",
-                                      prefix="devices",
-                                      callback=_device_capture)
-
-    gevent.sleep(0.1)
-
-    all_topic = 'devices/campus/building/all'
-    headers, message = publish_device_messages(inst_forward, all_topic=all_topic)
-
-    validate_published_device_data(headers, message,
-                                   pubsub_retrieved[0][1], pubsub_retrieved[0][2])
-
-    pub_listener.core.stop()
-    inst_target.stop_platform()
-
-    assert not inst_target.is_running()
-    assert inst_forward.is_agent_running(forwarder_uuid)
-
-    pubsub_retrieved = []
-
-    inst_target.restart_platform()
-    assert inst_target.is_running()
-    gevent.sleep(3)
-    pub_listener = inst_target.build_agent()
-    pub_listener.vip.pubsub.subscribe(peer="pubsub",
-                                      prefix="devices",
-                                      callback=_device_capture)
-
-    gevent.sleep(3)
-
-    all_topic = 'devices/campus/building/all'
-    headers, message = publish_device_messages(inst_forward,
-                                               all_topic=all_topic)
-    gevent.sleep(3)
-    validate_published_device_data(headers, message,
-                                   pubsub_retrieved[0][1],
-                                   pubsub_retrieved[0][2])
+    assert forwarder.destination_address == "tcp://127.0.0.1:22917"
+    assert forwarder.destination_serverkey == "new-key"
+    assert forwarder.topic_replace_list == [{"from": "old", "to": "new"}]
+    assert forwarder.cache_only is True
+    assert forwarder.historian_teardown_calls == 1
+    assert forwarder._target_platform is None
+    assert forwarder._last_timeout == 0
+    assert forwarder._topic_replace_map == {}
+    assert [item["prefix"] for item in forwarder.vip.pubsub.subscribed] == ["foo"]
 
 
-def test_can_pause_publishing(setup_instances):
-    pass
+@pytest.mark.forwarder
+def test_config_update_removes_custom_topic_subscription():
+    forwarder = _configurable_forwarder()
+    forwarder._current_custom_topics = {"foo", "bar"}
+
+    forwarder.configure({"custom_topic_list": ["bar"]})
+
+    assert forwarder._current_custom_topics == {"bar"}
